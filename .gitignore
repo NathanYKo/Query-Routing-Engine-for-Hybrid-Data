@@ -1,0 +1,7 @@
+data/raw/
+data/sqlite/*.db
+data/sqlite/*.sqlite
+data/sqlite/*.sqlite3
+data/index/
+__pycache__/
+*.pyc
