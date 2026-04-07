@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,34 @@ INDEX_OUT_DIR = DEFAULT_INDEX_DIR
 INDEX_REVIEW_LIMIT = 5000
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build a small review embedding index.")
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=INDEX_DB_PATH,
+        help=f"SQLite database path. Defaults to {INDEX_DB_PATH}",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=INDEX_OUT_DIR,
+        help=f"Output directory for review_index.* files. Defaults to {INDEX_OUT_DIR}",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=INDEX_REVIEW_LIMIT,
+        help=f"Maximum number of reviews to index. Defaults to {INDEX_REVIEW_LIMIT}",
+    )
+    parser.add_argument(
+        "--model-name",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"SentenceTransformer model name. Defaults to {DEFAULT_EMBEDDING_MODEL}",
+    )
+    return parser.parse_args()
+
+
 def fetch_reviews(db_path: Path, limit: int) -> list[dict]:
     query = """
     SELECT
@@ -27,6 +56,7 @@ def fetch_reviews(db_path: Path, limit: int) -> list[dict]:
         r.parent_asin,
         p.title AS product_title,
         r.rating,
+        r.review_title,
         r.review_text
     FROM reviews AS r
     LEFT JOIN products AS p
@@ -44,11 +74,12 @@ def fetch_reviews(db_path: Path, limit: int) -> list[dict]:
 
 
 def main() -> None:
-    reviews = fetch_reviews(INDEX_DB_PATH, INDEX_REVIEW_LIMIT)
+    args = parse_args()
+    reviews = fetch_reviews(args.db, args.limit)
     if not reviews:
         raise SystemExit("No non-empty review text found. Load reviews before building the index.")
 
-    model = load_embedding_model(DEFAULT_EMBEDDING_MODEL)
+    model = load_embedding_model(args.model_name)
     texts = [review["review_text"] for review in reviews]
     vectors = model.encode(
         texts,
@@ -58,13 +89,13 @@ def main() -> None:
         show_progress_bar=False,
     )
 
-    INDEX_OUT_DIR.mkdir(parents=True, exist_ok=True)
-    vectors_path = INDEX_OUT_DIR / "review_index.npy"
-    metadata_path = INDEX_OUT_DIR / "review_index.json"
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    vectors_path = args.out_dir / "review_index.npy"
+    metadata_path = args.out_dir / "review_index.json"
 
     np.save(vectors_path, vectors)
     metadata = {
-        "model_name": DEFAULT_EMBEDDING_MODEL,
+        "model_name": args.model_name,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "row_count": len(reviews),
         "records": [
@@ -72,6 +103,7 @@ def main() -> None:
                 "review_id": review["review_id"],
                 "parent_asin": review["parent_asin"],
                 "product_title": review["product_title"],
+                "review_title": review["review_title"],
                 "rating": review["rating"],
                 "review_text": review["review_text"],
                 "snippet": make_snippet(review["review_text"]),
@@ -82,6 +114,7 @@ def main() -> None:
     write_json(metadata_path, metadata)
 
     print(f"Built review index with {len(reviews)} rows")
+    print(f"Source DB: {args.db.resolve()}")
     print(f"Vectors saved to {vectors_path.resolve()}")
     print(f"Metadata saved to {metadata_path.resolve()}")
 
