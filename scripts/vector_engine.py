@@ -46,12 +46,7 @@ class VectorEngine:
     def add_documents(self, rows, batch_size: int = 64) -> None:
         metadata_ids = [row[0] for row in rows]
         texts = [row[1] for row in rows]
-        embeddings = self.model.encode(
-            texts,
-            convert_to_numpy=True,
-            batch_size=batch_size,
-            show_progress_bar=False,
-        )
+        embeddings = self.model.encode(texts, convert_to_numpy=True, batch_size=batch_size, show_progress_bar=False)
         self.index.add(normalize_embeddings(embeddings))
         self.metadata_mapping.extend(metadata_ids)
         self.rebuild_positions()
@@ -65,12 +60,7 @@ class VectorEngine:
                 results.append((self.metadata_mapping[idx], float(distances[0][i])))
         return results
 
-    def search_subset(
-        self,
-        query_text: str,
-        metadata_ids: list[str],
-        top_k: int = 5,
-    ) -> list[tuple[str, float]]:
+    def search_subset(self, query_text: str, metadata_ids: list[str], top_k: int = 5) -> list[tuple[str, float]]:
         query_vector = self.encode_query(query_text)
         results: list[tuple[str, float]] = []
         seen_ids: set[str] = set()
