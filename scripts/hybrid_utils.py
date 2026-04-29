@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import json
 import sqlite3
 from pathlib import Path
@@ -9,6 +10,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "sqlite" / "hybrid_router.db"
 DEFAULT_INDEX_DIR = PROJECT_ROOT / "data" / "index"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 
 def connect_db(db_path: Path) -> sqlite3.Connection:
