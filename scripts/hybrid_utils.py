@@ -35,7 +35,10 @@ def ensure_sentence_transformers() -> object:
 
 def load_embedding_model(model_name: str):
     sentence_transformer_cls = ensure_sentence_transformers()
-    return sentence_transformer_cls(model_name)
+    try:
+        return sentence_transformer_cls(model_name, local_files_only=True)
+    except Exception:
+        return sentence_transformer_cls(model_name)
 
 
 def fetch_distinct_values(conn: sqlite3.Connection, table: str, column: str) -> list[str]:
