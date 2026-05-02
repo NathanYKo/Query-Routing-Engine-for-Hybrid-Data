@@ -175,7 +175,12 @@ def run_vector_review_search(
         )
 
     model_name = metadata.get("model_name") or DEFAULT_EMBEDDING_MODEL
-    model = load_embedding_model(model_name)
+    try:
+        model = load_embedding_model(model_name)
+    except Exception as exc:
+        raise IndexLookupError(
+            f"Could not load embedding model {model_name}: {type(exc).__name__}"
+        ) from exc
     query_vector = model.encode(
         [query],
         convert_to_numpy=True,
@@ -219,6 +224,10 @@ def run_faiss_product_search(
         engine = VectorEngine.from_saved(index_path, mapping_path)
     except VectorEngineError as exc:
         raise IndexLookupError(str(exc)) from exc
+    except Exception as exc:
+        raise IndexLookupError(
+            f"Could not load product vector engine: {type(exc).__name__}"
+        ) from exc
 
     if candidate_asins is not None:
         vector_results = engine.search_subset(query, candidate_asins, top_k=top_k)
