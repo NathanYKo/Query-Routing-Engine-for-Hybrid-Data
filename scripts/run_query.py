@@ -82,7 +82,6 @@ class QueryAnalysis:
     structured_label: str | None
     matched_keywords: list[str]
     category_filter: str | None
-    store_filter: str | None
     numeric_threshold: float | None
     search_terms: list[str]
     semantic_terms: list[str]
@@ -146,14 +145,6 @@ def find_category_filter(match_query: str, conn) -> str | None:
     return None
 
 
-def find_store_filter(match_query: str, conn) -> str | None:
-    for store in distinct_candidates(fetch_distinct_values(conn, "products", "store")):
-        normalized = normalize_for_match(store)
-        if normalized and normalized in match_query:
-            return store
-    return None
-
-
 def collect_matched_keywords(match_query: str) -> list[str]:
     keywords: list[str] = []
     for phrase in TOP_RATED_PHRASES + UNDER_PHRASES + OVER_PHRASES + RATING_PHRASES + PRICE_HINTS:
@@ -185,7 +176,6 @@ def infer_structured_intent(match_query: str, threshold: float | None) -> tuple[
 def derive_semantic_terms(
     search_terms: list[str],
     category_filter: str | None,
-    store_filter: str | None,
     review_signals: list[str],
 ) -> list[str]:
     if review_signals:
@@ -194,8 +184,6 @@ def derive_semantic_terms(
     blocked_terms: set[str] = set()
     if category_filter:
         blocked_terms.update(normalize_for_match(category_filter).split())
-    if store_filter:
-        blocked_terms.update(normalize_for_match(store_filter).split())
 
     return [term for term in search_terms if term not in blocked_terms]
 
@@ -203,16 +191,12 @@ def derive_semantic_terms(
 def qualifies_for_mixed_search(
     structured_intent: str | None,
     category_filter: str | None,
-    store_filter: str | None,
     semantic_terms: list[str],
 ) -> bool:
     if not semantic_terms:
         return False
 
-    if category_filter or store_filter:
-        return True
-
-    if structured_intent in {"top_rated_products", "products_under_price"}:
+    if category_filter or structured_intent in {"top_rated_products", "products_under_price"}:
         return True
 
     return False
@@ -223,19 +207,18 @@ def infer_intent(
     structured_label: str | None,
     review_signals: list[str],
     category_filter: str | None,
-    store_filter: str | None,
     semantic_terms: list[str],
 ) -> tuple[str, str]:
     if review_signals:
         return "review_feedback_search", "review feedback search"
 
-    if qualifies_for_mixed_search(structured_intent, category_filter, store_filter, semantic_terms):
+    if qualifies_for_mixed_search(structured_intent, category_filter, semantic_terms):
         return "mixed_product_search", "mixed product search"
 
     if structured_intent and structured_label:
         return structured_intent, structured_label
 
-    if category_filter or store_filter:
+    if category_filter:
         if semantic_terms:
             return "mixed_product_search", "mixed product search"
         return "filtered_product_search", "filtered product search"
@@ -251,25 +234,21 @@ def analyze_query(query: str, conn) -> QueryAnalysis:
     match_query = normalize_for_match(query)
     threshold = numeric_threshold(query)
     category_filter = find_category_filter(match_query, conn)
-    store_filter = find_store_filter(match_query, conn)
     review_signals = detect_document_signals(match_query)
     matched_keywords = collect_matched_keywords(match_query)
     if category_filter:
         matched_keywords.append(f"category:{category_filter}")
-    if store_filter:
-        matched_keywords.append(f"store:{store_filter}")
 
     search_terms = extract_search_terms(match_query)
-    semantic_terms = derive_semantic_terms(search_terms, category_filter, store_filter, review_signals)
+    semantic_terms = derive_semantic_terms(search_terms, category_filter, review_signals)
     structured_intent, structured_label = infer_structured_intent(match_query, threshold)
-    has_structured_constraints = bool(structured_intent or category_filter or store_filter)
+    has_structured_constraints = bool(structured_intent or category_filter)
     has_semantic_product_terms = bool(semantic_terms)
     intent, label = infer_intent(
         structured_intent,
         structured_label,
         review_signals,
         category_filter,
-        store_filter,
         semantic_terms,
     )
 
@@ -283,7 +262,6 @@ def analyze_query(query: str, conn) -> QueryAnalysis:
         structured_label=structured_label,
         matched_keywords=matched_keywords,
         category_filter=category_filter,
-        store_filter=store_filter,
         numeric_threshold=threshold,
         search_terms=search_terms,
         semantic_terms=semantic_terms,
@@ -307,10 +285,6 @@ def product_scope_clauses(analysis: QueryAnalysis) -> tuple[list[str], list[obje
         clauses.append("(category = ? OR main_category = ?)")
         params.extend([analysis.category_filter, analysis.category_filter])
 
-    if analysis.store_filter:
-        clauses.append("store = ?")
-        params.append(analysis.store_filter)
-
     return clauses, params
 
 
@@ -332,7 +306,7 @@ def fetch_mixed_candidate_rows(analysis: QueryAnalysis, conn, top_k: int) -> tup
     clauses, params = structured_product_clauses(analysis)
     
     keyword_clauses = []
-    for term in analysis.semantic_terms[:3]:
+    for term in analysis.semantic_terms:
         keyword_clauses.append("LOWER(search_text) LIKE ?")
         params.append(f"%{term}%")
     if keyword_clauses:
@@ -435,19 +409,36 @@ def run_sql_query(analysis: QueryAnalysis, conn, top_k: int) -> tuple[str, list[
     return run_keyword_product_search(analysis, conn, top_k)
 
 
+def get_bytes_per_row(conn) -> int:
+    page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    total_db_bytes = page_count * page_size
+
+    product_rows = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+    review_rows = conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0]
+
+    weighted_total = (product_rows * 2.5) + review_rows
+    product_fraction = (product_rows * 2.5) / weighted_total if weighted_total else 1
+
+    estimated_products_bytes = int(total_db_bytes * product_fraction)
+    return estimated_products_bytes // product_rows
+
+
 def run_mixed_product_search(
     analysis: QueryAnalysis,
     conn,
     index_dir: Path,
     top_k: int,
+    bytes_per_row: int,
 ) -> tuple[str, str, list[dict], str | None]:
     candidate_count, candidate_rows = fetch_mixed_candidate_rows(analysis, conn, top_k)
     if candidate_count == 0:
         return "sql", "SQL candidate filter + FAISS rerank", [], None
 
-    sql_cost, faiss_cost = estimate_io(candidate_count, index_dir, conn)
-    if sql_cost <= faiss_cost:
-        return "sql", "SQL-only mixed fallback", candidate_rows[:top_k], None
+    sql_cost, faiss_cost = estimate_io(candidate_count, index_dir, bytes_per_row)
+    if sql_cost < faiss_cost * 0.8:
+        label, results = run_keyword_product_search(analysis, conn, top_k)
+        return "sql", "SQL-only mixed fallback", results, None
 
     try:
         label, results = run_faiss_product_search(
@@ -472,6 +463,7 @@ def run_query(
     conn,
     index_dir: Path,
     top_k: int,
+    bytes_per_row: int,
 ) -> tuple[RouteDecision, str, str, list[dict]]:
     route = route_query(analysis.intent, analysis.review_signals)
 
@@ -498,6 +490,7 @@ def run_query(
             conn,
             index_dir,
             top_k,
+            bytes_per_row,
         )
         if fallback_reason:
             fallback_route = RouteDecision(
@@ -516,7 +509,6 @@ def run_query(
                 index_dir=index_dir,
                 top_k=top_k,
                 category_filter=analysis.category_filter,
-                store_filter=analysis.store_filter,
             )
             if results:
                 return route, "product-vector", label, results
@@ -554,7 +546,6 @@ def print_results(
     print(f"Detected intent: {analysis.label}")
     print(f"Matched keywords: {', '.join(analysis.matched_keywords) if analysis.matched_keywords else 'none'}")
     print(f"Category filter: {analysis.category_filter or 'none'}")
-    print(f"Store filter: {analysis.store_filter or 'none'}")
     print(f"Numeric threshold: {analysis.numeric_threshold if analysis.numeric_threshold is not None else 'none'}")
     print(f"Search terms: {', '.join(analysis.search_terms) if analysis.search_terms else 'none'}")
     print(f"Semantic terms: {', '.join(analysis.semantic_terms) if analysis.semantic_terms else 'none'}")
@@ -584,8 +575,9 @@ def main() -> None:
 
     start = time.perf_counter()
     with connect_db(args.db) as conn:
+        bytes_per_row = get_bytes_per_row(conn)
         analysis = analyze_query(args.query, conn)
-        route, executed_engine, label, results = run_query(analysis, conn, args.index_dir, args.top_k)
+        route, executed_engine, label, results = run_query(analysis, conn, args.index_dir, args.top_k, bytes_per_row)
 
     elapsed = time.perf_counter() - start
     print_results(analysis, route, executed_engine, label, results, elapsed)

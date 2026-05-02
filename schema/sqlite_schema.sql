@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS products (
     store TEXT,
     features_json TEXT NOT NULL,
     description_json TEXT NOT NULL,
+    images_json TEXT NOT NULL,
+    videos_json TEXT NOT NULL,
     categories_json TEXT NOT NULL,
     details_json TEXT NOT NULL,
     bought_together TEXT,

@@ -62,15 +62,9 @@ def detect_document_signals(match_query: str) -> list[str]:
     return signals
 
 
-def estimate_io(candidate_count: int, index_dir: Path, conn) -> tuple[float, float]:
+def estimate_io(candidate_count: int, index_dir: Path, bytes_per_row: int) -> tuple[int, int]:
     index_path, _ = resolve_product_index(index_dir)
     index_size = index_path.stat().st_size
-    row = conn.execute(
-        "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()"
-    ).fetchone()
-    total_rows = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
-    bytes_per_row = (row[0] // total_rows)
-
     sql_cost = candidate_count * bytes_per_row
     faiss_cost = index_size + (candidate_count * 384 * 4)
     print(f"Estimated SQL I/O: {sql_cost / 1e6:.2f} MB, FAISS I/O: {faiss_cost / 1e6:.2f} MB")
