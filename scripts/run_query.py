@@ -309,7 +309,7 @@ def fetch_mixed_candidate_rows(analysis: QueryAnalysis, conn, top_k: int) -> tup
     clauses, params = structured_product_clauses(analysis)
     
     keyword_clauses = []
-    for term in analysis.semantic_terms[:3]:
+    for term in analysis.semantic_terms:
         keyword_clauses.append("LOWER(search_text) LIKE ?")
         params.append(f"%{term}%")
     if keyword_clauses:
@@ -412,19 +412,36 @@ def run_sql_query(analysis: QueryAnalysis, conn, top_k: int) -> tuple[str, list[
     return run_keyword_product_search(analysis, conn, top_k)
 
 
+def get_bytes_per_row(conn) -> int:
+    page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    total_db_bytes = page_count * page_size
+
+    product_rows = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+    review_rows = conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0]
+
+    weighted_total = (product_rows * 2.5) + review_rows
+    product_fraction = (product_rows * 2.5) / weighted_total if weighted_total else 1
+
+    estimated_products_bytes = int(total_db_bytes * product_fraction)
+    return estimated_products_bytes // product_rows
+
+
 def run_mixed_product_search(
     analysis: QueryAnalysis,
     conn,
     index_dir: Path,
     top_k: int,
+    bytes_per_row: int,
 ) -> tuple[str, str, list[dict], str | None]:
     candidate_count, candidate_rows = fetch_mixed_candidate_rows(analysis, conn, top_k)
     if candidate_count == 0:
         return "sql", "SQL candidate filter + FAISS rerank", [], None
 
-    sql_cost, faiss_cost = estimate_io(candidate_count, index_dir, conn)
-    if sql_cost <= faiss_cost:
-        return "sql", "SQL-only mixed fallback", candidate_rows[:top_k], None
+    sql_cost, faiss_cost = estimate_io(candidate_count, index_dir, bytes_per_row)
+    if sql_cost < faiss_cost * 0.8:
+        label, results = run_keyword_product_search(analysis, conn, top_k)
+        return "sql", "SQL-only mixed fallback", results, None
 
     try:
         label, results = run_faiss_product_search(
@@ -449,6 +466,7 @@ def run_query(
     conn,
     index_dir: Path,
     top_k: int,
+    bytes_per_row: int,
 ) -> tuple[RouteDecision, str, str, list[dict]]:
     route = route_query(analysis.intent, analysis.review_signals)
 
@@ -475,6 +493,7 @@ def run_query(
             conn,
             index_dir,
             top_k,
+            bytes_per_row,
         )
         if fallback_reason:
             fallback_route = RouteDecision(
@@ -559,8 +578,9 @@ def main() -> None:
 
     start = time.perf_counter()
     with connect_db(args.db) as conn:
+        bytes_per_row = get_bytes_per_row(conn)
         analysis = analyze_query(args.query, conn)
-        route, executed_engine, label, results = run_query(analysis, conn, args.index_dir, args.top_k)
+        route, executed_engine, label, results = run_query(analysis, conn, args.index_dir, args.top_k, bytes_per_row)
 
     elapsed = time.perf_counter() - start
     print_results(analysis, route, executed_engine, label, results, elapsed)
