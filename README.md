@@ -70,12 +70,23 @@ Mixed query:
 python scripts/run_query.py --query "top rated shampoo for volume"
 ```
 
+## Evaluation
+
+Run the fixed evaluation set and write a markdown report:
+
+```powershell
+python scripts/evaluate_queries.py
+```
+
+The query list lives in `docs/evaluation_queries.md`, and the generated report is written to `docs/evaluation_results.md`.
+
 ## Main Files
 
 - `scripts/load_amazon_reviews.py`: load Amazon data into SQLite
 - `scripts/build_review_index.py`: build review embeddings
 - `scripts/build_product_index.py`: build FAISS product index
 - `scripts/run_query.py`: analyze and run queries
+- `scripts/evaluate_queries.py`: run the fixed routing evaluation and generate the results report
 - `scripts/routing_engine.py`: routing logic
 
 ## Notes

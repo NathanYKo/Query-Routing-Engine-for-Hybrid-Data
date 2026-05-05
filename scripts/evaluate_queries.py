@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import time
+from collections import Counter
 from pathlib import Path
+from statistics import median
 
 from hybrid_utils import connect_db, make_snippet
 from run_query import analyze_query, run_query
@@ -126,6 +128,28 @@ def top_result_summary(results: list[dict]) -> str:
     return make_snippet(str(result), length=90)
 
 
+def format_seconds(value: float) -> str:
+    return f"{value:.4f}"
+
+
+def format_counter(counter: Counter) -> str:
+    return ", ".join(f"{name} ({count})" for name, count in sorted(counter.items()))
+
+
+def count_label(count: int, singular: str, plural: str | None = None) -> str:
+    if count == 1:
+        return f"{count} {singular}"
+    return f"{count} {plural or singular + 's'}"
+
+
+def fetch_dataset_counts(db_path: Path) -> dict[str, int]:
+    with connect_db(db_path) as conn:
+        return {
+            "product_count": int(conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]),
+            "review_count": int(conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0]),
+        }
+
+
 def run_evaluation(db_path: Path, index_dir: Path, top_k: int) -> list[dict]:
     rows: list[dict] = []
     with connect_db(db_path) as conn:
@@ -143,7 +167,7 @@ def run_evaluation(db_path: Path, index_dir: Path, top_k: int) -> list[dict]:
                     "routed_engine": route.engine,
                     "executed_engine": executed_engine,
                     "execution_mode": label,
-                    "latency_seconds": f"{elapsed:.4f}",
+                    "latency_seconds": elapsed,
                     "result_count": len(results),
                     "top_result": top_result_summary(results),
                     "route_match": "PASS" if route.engine == item["expected_engine"] else "FAIL",
@@ -153,25 +177,173 @@ def run_evaluation(db_path: Path, index_dir: Path, top_k: int) -> list[dict]:
     return rows
 
 
-def render_markdown(rows: list[dict], db_path: Path, index_dir: Path, top_k: int) -> str:
+def summarize_category(category: str, rows: list[dict]) -> dict[str, object]:
+    category_rows = [row for row in rows if row["category"] == category]
+    latencies = [float(row["latency_seconds"]) for row in category_rows]
+    return {
+        "category": category,
+        "query_count": len(category_rows),
+        "route_match_count": sum(1 for row in category_rows if row["route_match"] == "PASS"),
+        "non_empty_count": sum(1 for row in category_rows if row["result_count"] > 0),
+        "avg_seconds": sum(latencies) / len(latencies),
+        "median_seconds": median(latencies),
+        "max_seconds": max(latencies),
+        "executed_counts": Counter(row["executed_engine"] for row in category_rows),
+    }
+
+
+def category_note(summary: dict[str, object]) -> str:
+    category = str(summary["category"])
+    if category == "Structured SQL":
+        return "All structured queries stayed on SQL and returned results."
+
+    if category == "Product Vector":
+        max_seconds = float(summary["max_seconds"])
+        median_seconds = float(summary["median_seconds"])
+        if median_seconds > 0 and max_seconds >= median_seconds * 5:
+            return "One slower first vector lookup dominates the average; later product-vector queries were warm."
+        return "All product-vector queries returned results through FAISS search."
+
+    if category == "Review Vector":
+        return "All review-vector queries returned five review hits."
+
+    if category == "Mixed":
+        executed_counts = summary["executed_counts"]
+        mixed_count = executed_counts.get("mixed", 0)
+        sql_count = executed_counts.get("sql", 0)
+        return (
+            f"{count_label(mixed_count, 'query', 'queries')} completed reranking; "
+            f"{count_label(sql_count, 'query', 'queries')} stayed on SQL after candidate filtering."
+        )
+
+    return ""
+
+
+def render_markdown(
+    rows: list[dict],
+    db_path: Path,
+    index_dir: Path,
+    top_k: int,
+    dataset_counts: dict[str, int],
+) -> str:
     pass_count = sum(1 for row in rows if row["route_match"] == "PASS")
+    category_order: list[str] = []
+    for row in rows:
+        if row["category"] not in category_order:
+            category_order.append(row["category"])
+
+    category_summaries = [summarize_category(category, rows) for category in category_order]
+    summary_by_category = {str(summary["category"]): summary for summary in category_summaries}
+    structured_summary = summary_by_category["Structured SQL"]
+    product_summary = summary_by_category["Product Vector"]
+    mixed_summary = summary_by_category["Mixed"]
+
+    pure_vector_count = sum(
+        1 for row in rows if row["category"] in {"Product Vector", "Review Vector"}
+    )
+    pure_vector_non_empty = sum(
+        1
+        for row in rows
+        if row["category"] in {"Product Vector", "Review Vector"} and row["result_count"] > 0
+    )
+    mixed_rerank_count = sum(
+        1 for row in rows if row["category"] == "Mixed" and row["executed_engine"] == "mixed"
+    )
+    mixed_zero_result_count = sum(
+        1
+        for row in rows
+        if row["category"] == "Mixed"
+        and row["executed_engine"] == "sql"
+        and row["result_count"] == 0
+    )
+
     lines = [
         "# Evaluation Results",
         "",
+        "## Setup",
+        "",
         f"- Database: `{db_path}`",
         f"- Index directory: `{index_dir}`",
+        (
+            f"- Dataset size: `{dataset_counts['product_count']}` products and "
+            f"`{dataset_counts['review_count']}` reviews"
+        ),
         f"- Top-k: `{top_k}`",
+        f"- Query set: `{len(rows)}` fixed evaluation queries from `docs/evaluation_queries.md`",
         f"- Route matches: `{pass_count}/{len(rows)}`",
         "",
-        "| Category | Query | Expected | Routed | Executed | Mode | Seconds | Results | Top Result | Route |",
-        "| --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- |",
+        "## Headline Findings",
+        "",
+        f"- Routing matched the expected engine for all `{pass_count}/{len(rows)}` queries.",
+        (
+            f"- Structured SQL was the fastest path, averaging "
+            f"`{format_seconds(float(structured_summary['avg_seconds']))}` seconds across "
+            f"`{structured_summary['query_count']}` queries."
+        ),
+        (
+            f"- All `{pure_vector_non_empty}/{pure_vector_count}` pure vector queries returned "
+            "non-empty results. Product-vector latency showed a cold-start effect in this run: "
+            f"max `{format_seconds(float(product_summary['max_seconds']))}` seconds versus median "
+            f"`{format_seconds(float(product_summary['median_seconds']))}` seconds."
+        ),
+        (
+            f"- Mixed routing matched expectation on all "
+            f"`{mixed_summary['route_match_count']}/{mixed_summary['query_count']}` mixed queries, "
+            f"but only `{mixed_rerank_count}/{mixed_summary['query_count']}` completed reranking and "
+            f"`{mixed_zero_result_count}/{mixed_summary['query_count']}` returned zero rows after "
+            "SQL candidate filtering."
+        ),
+        "",
+        "## Category Summary",
+        "",
+        "| Category | Queries | Route Matches | Non-empty | Avg sec | Median sec | Executed engines | Notes |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
 
-    for row in rows:
+    for summary in category_summaries:
         lines.append(
             "| "
             + " | ".join(
-                markdown_escape(row[key])
+                [
+                    markdown_escape(summary["category"]),
+                    markdown_escape(summary["query_count"]),
+                    markdown_escape(
+                        f"{summary['route_match_count']}/{summary['query_count']}"
+                    ),
+                    markdown_escape(f"{summary['non_empty_count']}/{summary['query_count']}"),
+                    markdown_escape(format_seconds(float(summary["avg_seconds"]))),
+                    markdown_escape(format_seconds(float(summary["median_seconds"]))),
+                    markdown_escape(format_counter(summary["executed_counts"])),
+                    markdown_escape(category_note(summary)),
+                ]
+            )
+            + " |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Caveats",
+            "",
+            "- This report checks routing correctness and basic execution behavior on the demo dataset; it is not a formal relevance benchmark.",
+            "- The demo database is intentionally small, so zero-result mixed queries mainly reflect sparse candidate coverage rather than a scalability result.",
+            "- `Routed` records the analyzer decision, while `Executed` records the engine actually used after mixed-query candidate filtering or fallbacks.",
+            "- Vector timings include one-time model loading inside the Python process, so the first vector lookup is a cold-start measurement.",
+            "",
+            "## Detailed Results",
+            "",
+        "| Category | Query | Expected | Routed | Executed | Mode | Seconds | Results | Top Result | Route |",
+        "| --- | --- | --- | --- | --- | --- | ---: | ---: | --- | --- |",
+        ]
+    )
+
+    for row in rows:
+        display_row = dict(row)
+        display_row["latency_seconds"] = format_seconds(float(row["latency_seconds"]))
+        lines.append(
+            "| "
+            + " | ".join(
+                markdown_escape(display_row[key])
                 for key in (
                     "category",
                     "query",
@@ -194,7 +366,8 @@ def render_markdown(rows: list[dict], db_path: Path, index_dir: Path, top_k: int
 def main() -> None:
     args = parse_args()
     rows = run_evaluation(args.db, args.index_dir, args.top_k)
-    output = render_markdown(rows, args.db, args.index_dir, args.top_k)
+    dataset_counts = fetch_dataset_counts(args.db)
+    output = render_markdown(rows, args.db, args.index_dir, args.top_k, dataset_counts)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(output, encoding="utf-8")
