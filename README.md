@@ -89,6 +89,10 @@ The query list lives in `docs/evaluation_queries.md`, and the generated report i
 - `scripts/evaluate_queries.py`: run the fixed routing evaluation and generate the results report
 - `scripts/routing_engine.py`: routing logic
 
+## Contributions
+
+Ethan Kusnadi contributed to the SQLite database setup, FAISS vector execution engine implementation, routing engine, mixed engine and cost-estimation logic, testing, and bug fixes. He also led most of the project writing and documentation, including the tables and figures.
+
 ## Notes
 
 - Default database path: `data/sqlite/hybrid_router.db`
