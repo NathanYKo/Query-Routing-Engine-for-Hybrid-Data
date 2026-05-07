@@ -436,7 +436,7 @@ def run_mixed_product_search(
         return "sql", "SQL candidate filter + FAISS rerank", [], None
 
     sql_cost, faiss_cost = estimate_io(candidate_count, index_dir, bytes_per_row)
-    if sql_cost < faiss_cost * 0.8:
+    if sql_cost < faiss_cost * 0.5:
         label, results = run_keyword_product_search(analysis, conn, top_k)
         return "sql", "SQL-only mixed fallback", results, None
 
