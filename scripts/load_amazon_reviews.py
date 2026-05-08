@@ -4,6 +4,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import math
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -113,8 +114,16 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SCHEMA_PATH,
         help=f"Schema file path. Defaults to {DEFAULT_SCHEMA_PATH}",
     )
-    parser.add_argument("--reviews", type=Path, help="Path to a review JSONL or JSONL.GZ file")
-    parser.add_argument("--metadata", type=Path, help="Path to a metadata JSONL or JSONL.GZ file")
+    parser.add_argument(
+        "--reviews",
+        type=Path,
+        help="Path to a review JSONL, JSONL.GZ, or parquet file",
+    )
+    parser.add_argument(
+        "--metadata",
+        type=Path,
+        help="Path to a metadata JSONL, JSONL.GZ, or parquet file",
+    )
     parser.add_argument(
         "--limit",
         type=int,
@@ -153,6 +162,40 @@ def open_text_file(path: Path) -> TextIO:
     return path.open("r", encoding="utf-8")
 
 
+def ensure_pyarrow_parquet():
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise SystemExit(
+            "Missing dependency 'pyarrow' required for parquet input files."
+        ) from exc
+
+    return pq
+
+
+def normalize_record_value(value: object) -> object:
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, dict):
+        return {key: normalize_record_value(nested) for key, nested in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [normalize_record_value(item) for item in value]
+    if isinstance(value, (str, bytes, bytearray)):
+        return value
+    if hasattr(value, "tolist"):
+        converted = value.tolist()
+        if converted is not value:
+            return normalize_record_value(converted)
+    if hasattr(value, "item"):
+        try:
+            return normalize_record_value(value.item())
+        except Exception:
+            return value
+    return value
+
+
 def iter_json_lines(path: Path, limit: int | None = None) -> Iterator[dict]:
     with open_text_file(path) as handle:
         count = 0
@@ -164,6 +207,25 @@ def iter_json_lines(path: Path, limit: int | None = None) -> Iterator[dict]:
             count += 1
             if limit is not None and count >= limit:
                 break
+
+
+def iter_parquet_rows(path: Path, limit: int | None = None) -> Iterator[dict]:
+    parquet = ensure_pyarrow_parquet()
+    file = parquet.ParquetFile(path)
+    count = 0
+
+    for batch in file.iter_batches(batch_size=1000):
+        for record in batch.to_pylist():
+            yield normalize_record_value(record)
+            count += 1
+            if limit is not None and count >= limit:
+                return
+
+
+def iter_records(path: Path, limit: int | None = None) -> Iterator[dict]:
+    if path.suffix.lower() == ".parquet":
+        return iter_parquet_rows(path, limit)
+    return iter_json_lines(path, limit)
 
 
 def json_text(value: object) -> str:
@@ -339,7 +401,7 @@ def main() -> None:
         if args.metadata:
             metadata_rows = (
                 build_product_row(args.category, record)
-                for record in iter_json_lines(args.metadata, args.limit)
+                for record in iter_records(args.metadata, args.limit)
                 if record.get("parent_asin")
             )
             product_count, product_skipped = batched_upsert(
@@ -355,7 +417,7 @@ def main() -> None:
         if args.reviews:
             review_rows = (
                 build_review_row(args.category, record)
-                for record in iter_json_lines(args.reviews, args.limit)
+                for record in iter_records(args.reviews, args.limit)
             )
             review_count, review_skipped = batched_upsert(
                 conn,

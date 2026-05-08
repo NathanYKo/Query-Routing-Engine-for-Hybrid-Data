@@ -1,10 +1,11 @@
-from vector_engine import VectorEngine
+from __future__ import annotations
+
 from hybrid_utils import DEFAULT_DB_PATH, DEFAULT_INDEX_DIR, connect_db
+from vector_engine import VectorEngine
 
 PRODUCT_INDEX_PATH = DEFAULT_INDEX_DIR / "product_index.faiss"
 PRODUCT_MAPPING_PATH = DEFAULT_INDEX_DIR / "product_index.npy"
-
-queries = [
+QUERIES = [
     "leather conditioner for dry leather",
     "cleanser for acne prone skin",
     "waterproof eyebrow makeup",
@@ -12,24 +13,33 @@ queries = [
     "something for the morning routine",
 ]
 
-engine = VectorEngine.from_saved(PRODUCT_INDEX_PATH, PRODUCT_MAPPING_PATH)
 
-with connect_db(DEFAULT_DB_PATH) as conn:
-    for query in queries:
-        print(f"\n---- QUERY: {query} ----")
-        results = engine.search(query, k=5)
+def main() -> None:
+    engine = VectorEngine.from_saved(PRODUCT_INDEX_PATH, PRODUCT_MAPPING_PATH)
 
-        for parent_asin, score in results:
-            row = conn.execute("""
-                SELECT title, store, average_rating, price_value
-                FROM products
-                WHERE parent_asin = ?
-            """, (parent_asin,)).fetchone()
+    with connect_db(DEFAULT_DB_PATH) as conn:
+        for query in QUERIES:
+            print(f"\n---- QUERY: {query} ----")
+            results = engine.search(query, k=5)
 
-            if row:
-                print(f"  Title: {row['title']}")
-                print(f"  Store: {row['store']}")
-                print(f"  Rating: {row['average_rating']}")
-                print(f"  Price: {row['price_value']}")
-                print(f"  Similarity Score: {score:.4f}")
-                print("  ---")
+            for parent_asin, score in results:
+                row = conn.execute(
+                    """
+                    SELECT title, store, average_rating, price_value
+                    FROM products
+                    WHERE parent_asin = ?
+                    """,
+                    (parent_asin,),
+                ).fetchone()
+
+                if row:
+                    print(f"  Title: {row['title']}")
+                    print(f"  Store: {row['store']}")
+                    print(f"  Rating: {row['average_rating']}")
+                    print(f"  Price: {row['price_value']}")
+                    print(f"  Similarity Score: {score:.4f}")
+                    print("  ---")
+
+
+if __name__ == "__main__":
+    main()

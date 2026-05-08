@@ -82,6 +82,7 @@ class QueryAnalysis:
     structured_label: str | None
     matched_keywords: list[str]
     category_filter: str | None
+    store_filter: str | None
     numeric_threshold: float | None
     search_terms: list[str]
     semantic_terms: list[str]
@@ -140,8 +141,69 @@ def find_category_filter(match_query: str, conn) -> str | None:
     categories.extend(fetch_distinct_values(conn, "products", "main_category"))
     for category in distinct_candidates(categories):
         normalized = normalize_for_match(category)
-        if normalized and normalized in match_query:
+        if normalized and contains_phrase(match_query, normalized):
             return category
+    return None
+
+
+def is_generic_store_match(normalized: str) -> bool:
+    tokens = normalized.split()
+    if not tokens:
+        return True
+    if len(tokens) == 1 and (len(tokens[0]) < 4 or tokens[0] in SEARCH_STOPWORDS):
+        return True
+    if all(token in SEARCH_STOPWORDS for token in tokens):
+        return True
+    return False
+
+
+def inferred_store_phrase(query: str) -> str | None:
+    by_match = re.search(r"\bby\s+(.+)$", query, flags=re.IGNORECASE)
+    if by_match:
+        candidate = by_match.group(1).strip(" .,:;!?\"'()[]{}")
+        normalized = normalize_for_match(candidate)
+        if normalized and not is_generic_store_match(normalized):
+            return candidate
+
+    leading_brand_match = re.match(
+        r"^\s*([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*)+)\s+products?\b",
+        query,
+    )
+    if leading_brand_match:
+        candidate = leading_brand_match.group(1).strip(" .,:;!?\"'()[]{}")
+        normalized = normalize_for_match(candidate)
+        if normalized and not is_generic_store_match(normalized):
+            return candidate
+
+    return None
+
+
+def canonical_store_name(candidate: str, stores: list[str]) -> str | None:
+    normalized_candidate = normalize_for_match(candidate)
+    if not normalized_candidate or is_generic_store_match(normalized_candidate):
+        return None
+
+    for store in stores:
+        if normalize_for_match(store) == normalized_candidate:
+            return store
+
+    return None
+
+
+def find_store_filter(query: str, match_query: str, conn) -> str | None:
+    stores = distinct_candidates(fetch_distinct_values(conn, "products", "store"))
+    inferred = inferred_store_phrase(query)
+    if inferred:
+        return canonical_store_name(inferred, stores) or inferred
+
+    for store in stores:
+        normalized = normalize_for_match(store)
+        if not normalized or is_generic_store_match(normalized):
+            continue
+        if len(normalized.split()) < 2:
+            continue
+        if contains_phrase(match_query, normalized):
+            return store
     return None
 
 
@@ -176,6 +238,7 @@ def infer_structured_intent(match_query: str, threshold: float | None) -> tuple[
 def derive_semantic_terms(
     search_terms: list[str],
     category_filter: str | None,
+    store_filter: str | None,
     review_signals: list[str],
 ) -> list[str]:
     if review_signals:
@@ -184,6 +247,8 @@ def derive_semantic_terms(
     blocked_terms: set[str] = set()
     if category_filter:
         blocked_terms.update(normalize_for_match(category_filter).split())
+    if store_filter:
+        blocked_terms.update(normalize_for_match(store_filter).split())
 
     return [term for term in search_terms if term not in blocked_terms]
 
@@ -191,12 +256,17 @@ def derive_semantic_terms(
 def qualifies_for_mixed_search(
     structured_intent: str | None,
     category_filter: str | None,
+    store_filter: str | None,
     semantic_terms: list[str],
 ) -> bool:
     if not semantic_terms:
         return False
 
-    if category_filter or structured_intent in {"top_rated_products", "products_under_price"}:
+    if (
+        category_filter
+        or store_filter
+        or structured_intent in {"top_rated_products", "products_under_price"}
+    ):
         return True
 
     return False
@@ -207,18 +277,24 @@ def infer_intent(
     structured_label: str | None,
     review_signals: list[str],
     category_filter: str | None,
+    store_filter: str | None,
     semantic_terms: list[str],
 ) -> tuple[str, str]:
     if review_signals:
         return "review_feedback_search", "review feedback search"
 
-    if qualifies_for_mixed_search(structured_intent, category_filter, semantic_terms):
+    if qualifies_for_mixed_search(
+        structured_intent,
+        category_filter,
+        store_filter,
+        semantic_terms,
+    ):
         return "mixed_product_search", "mixed product search"
 
     if structured_intent and structured_label:
         return structured_intent, structured_label
 
-    if category_filter:
+    if category_filter or store_filter:
         if semantic_terms:
             return "mixed_product_search", "mixed product search"
         return "filtered_product_search", "filtered product search"
@@ -234,21 +310,30 @@ def analyze_query(query: str, conn) -> QueryAnalysis:
     match_query = normalize_for_match(query)
     threshold = numeric_threshold(query)
     category_filter = find_category_filter(match_query, conn)
+    store_filter = find_store_filter(query, match_query, conn)
     review_signals = detect_document_signals(match_query)
     matched_keywords = collect_matched_keywords(match_query)
     if category_filter:
         matched_keywords.append(f"category:{category_filter}")
+    if store_filter:
+        matched_keywords.append(f"store:{store_filter}")
 
     search_terms = extract_search_terms(match_query)
-    semantic_terms = derive_semantic_terms(search_terms, category_filter, review_signals)
+    semantic_terms = derive_semantic_terms(
+        search_terms,
+        category_filter,
+        store_filter,
+        review_signals,
+    )
     structured_intent, structured_label = infer_structured_intent(match_query, threshold)
-    has_structured_constraints = bool(structured_intent or category_filter)
+    has_structured_constraints = bool(structured_intent or category_filter or store_filter)
     has_semantic_product_terms = bool(semantic_terms)
     intent, label = infer_intent(
         structured_intent,
         structured_label,
         review_signals,
         category_filter,
+        store_filter,
         semantic_terms,
     )
 
@@ -262,6 +347,7 @@ def analyze_query(query: str, conn) -> QueryAnalysis:
         structured_label=structured_label,
         matched_keywords=matched_keywords,
         category_filter=category_filter,
+        store_filter=store_filter,
         numeric_threshold=threshold,
         search_terms=search_terms,
         semantic_terms=semantic_terms,
@@ -284,6 +370,9 @@ def product_scope_clauses(analysis: QueryAnalysis) -> tuple[list[str], list[obje
     if analysis.category_filter:
         clauses.append("(category = ? OR main_category = ?)")
         params.extend([analysis.category_filter, analysis.category_filter])
+    if analysis.store_filter:
+        clauses.append("store = ?")
+        params.append(analysis.store_filter)
 
     return clauses, params
 
@@ -409,6 +498,14 @@ def run_sql_query(analysis: QueryAnalysis, conn, top_k: int) -> tuple[str, list[
     return run_keyword_product_search(analysis, conn, top_k)
 
 
+def build_sql_fallback_route(route: RouteDecision, reason: str) -> RouteDecision:
+    return RouteDecision(
+        engine=route.engine,
+        reason=f"{route.reason}; fallback to SQL because {reason}",
+        matched_signals=route.matched_signals,
+    )
+
+
 def get_bytes_per_row(conn) -> int:
     page_count = conn.execute("PRAGMA page_count").fetchone()[0]
     page_size = conn.execute("PRAGMA page_size").fetchone()[0]
@@ -416,12 +513,14 @@ def get_bytes_per_row(conn) -> int:
 
     product_rows = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
     review_rows = conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0]
+    if product_rows == 0:
+        return max(page_size, 1)
 
     weighted_total = (product_rows * 2.5) + review_rows
     product_fraction = (product_rows * 2.5) / weighted_total if weighted_total else 1
 
     estimated_products_bytes = int(total_db_bytes * product_fraction)
-    return estimated_products_bytes // product_rows
+    return max(estimated_products_bytes // product_rows, 1)
 
 
 def run_mixed_product_search(
@@ -477,11 +576,7 @@ def run_query(
             return route, "review-vector", label, results
         except IndexLookupError as exc:
             label, results = run_keyword_product_search(analysis, conn, top_k)
-            fallback_route = RouteDecision(
-                engine=route.engine,
-                reason=f"{route.reason}; fallback to SQL because {exc}",
-                matched_signals=route.matched_signals,
-            )
+            fallback_route = build_sql_fallback_route(route, str(exc))
             return fallback_route, "sql", f"{label} (fallback)", results
 
     if route.engine == "mixed":
@@ -493,11 +588,7 @@ def run_query(
             bytes_per_row,
         )
         if fallback_reason:
-            fallback_route = RouteDecision(
-                engine=route.engine,
-                reason=f"{route.reason}; fallback to SQL because {fallback_reason}",
-                matched_signals=route.matched_signals,
-            )
+            fallback_route = build_sql_fallback_route(route, fallback_reason)
             return fallback_route, executed_engine, label, results
         return route, executed_engine, label, results
 
@@ -509,24 +600,20 @@ def run_query(
                 index_dir=index_dir,
                 top_k=top_k,
                 category_filter=analysis.category_filter,
+                store_filter=analysis.store_filter,
             )
             if results:
                 return route, "product-vector", label, results
 
             label, results = run_keyword_product_search(analysis, conn, top_k)
-            fallback_route = RouteDecision(
-                engine=route.engine,
-                reason=f"{route.reason}; fallback to SQL because FAISS returned no scoped product hits",
-                matched_signals=route.matched_signals,
+            fallback_route = build_sql_fallback_route(
+                route,
+                "FAISS returned no scoped product hits",
             )
             return fallback_route, "sql", f"{label} (fallback)", results
         except IndexLookupError as exc:
             label, results = run_keyword_product_search(analysis, conn, top_k)
-            fallback_route = RouteDecision(
-                engine=route.engine,
-                reason=f"{route.reason}; fallback to SQL because {exc}",
-                matched_signals=route.matched_signals,
-            )
+            fallback_route = build_sql_fallback_route(route, str(exc))
             return fallback_route, "sql", f"{label} (fallback)", results
 
     label, results = run_sql_query(analysis, conn, top_k)
@@ -546,6 +633,7 @@ def print_results(
     print(f"Detected intent: {analysis.label}")
     print(f"Matched keywords: {', '.join(analysis.matched_keywords) if analysis.matched_keywords else 'none'}")
     print(f"Category filter: {analysis.category_filter or 'none'}")
+    print(f"Store filter: {analysis.store_filter or 'none'}")
     print(f"Numeric threshold: {analysis.numeric_threshold if analysis.numeric_threshold is not None else 'none'}")
     print(f"Search terms: {', '.join(analysis.search_terms) if analysis.search_terms else 'none'}")
     print(f"Semantic terms: {', '.join(analysis.semantic_terms) if analysis.semantic_terms else 'none'}")

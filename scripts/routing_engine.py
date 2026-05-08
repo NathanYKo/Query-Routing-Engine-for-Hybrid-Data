@@ -36,6 +36,8 @@ DOCUMENT_TERMS = {
     "review",
     "reviews",
 }
+PRODUCT_VECTOR_BYTES = 384 * 4
+PRODUCT_ENGINE_CACHE: dict[tuple[str, str, str], VectorEngine] = {}
 
 
 class IndexLookupError(RuntimeError):
@@ -64,10 +66,14 @@ def detect_document_signals(match_query: str) -> list[str]:
 
 def estimate_io(candidate_count: int, index_dir: Path, bytes_per_row: int) -> tuple[int, int]:
     index_path, _ = resolve_product_index(index_dir)
-    index_size = index_path.stat().st_size
+    index_size = 0 if is_product_index_warm(index_dir) else index_path.stat().st_size
     sql_cost = candidate_count * bytes_per_row
-    faiss_cost = index_size + (candidate_count * 384 * 4)
-    print(f"Estimated SQL I/O: {sql_cost / 1e6:.2f} MB, FAISS I/O: {faiss_cost / 1e6:.2f} MB")
+    faiss_cost = index_size + (candidate_count * PRODUCT_VECTOR_BYTES)
+    cache_state = "warm" if index_size == 0 else "cold"
+    print(
+        f"Estimated SQL I/O: {sql_cost / 1e6:.2f} MB, "
+        f"FAISS I/O ({cache_state}): {faiss_cost / 1e6:.2f} MB"
+    )
     return sql_cost, faiss_cost
 
 
@@ -159,6 +165,40 @@ def resolve_product_index(index_dir: Path) -> tuple[Path, Path]:
     return newest_index, newest_mapping
 
 
+def product_engine_cache_key(
+    index_path: Path,
+    mapping_path: Path,
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+) -> tuple[str, str, str]:
+    return (str(index_path.resolve()), str(mapping_path.resolve()), model_name)
+
+
+def is_product_index_warm(
+    index_dir: Path,
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+) -> bool:
+    try:
+        index_path, mapping_path = resolve_product_index(index_dir)
+    except IndexLookupError:
+        return False
+    return product_engine_cache_key(index_path, mapping_path, model_name) in PRODUCT_ENGINE_CACHE
+
+
+def load_cached_product_engine(
+    index_path: Path,
+    mapping_path: Path,
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+) -> VectorEngine:
+    cache_key = product_engine_cache_key(index_path, mapping_path, model_name)
+    cached = PRODUCT_ENGINE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    engine = VectorEngine.from_saved(index_path, mapping_path, model_name=model_name)
+    PRODUCT_ENGINE_CACHE[cache_key] = engine
+    return engine
+
+
 def run_vector_review_search(
     query: str,
     index_dir: Path = DEFAULT_INDEX_DIR,
@@ -221,7 +261,7 @@ def run_faiss_product_search(
 ) -> tuple[str, list[dict]]:
     index_path, mapping_path = resolve_product_index(index_dir)
     try:
-        engine = VectorEngine.from_saved(index_path, mapping_path)
+        engine = load_cached_product_engine(index_path, mapping_path)
     except VectorEngineError as exc:
         raise IndexLookupError(str(exc)) from exc
     except Exception as exc:

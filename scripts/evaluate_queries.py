@@ -6,14 +6,13 @@ from collections import Counter
 from pathlib import Path
 from statistics import median
 
-from hybrid_utils import connect_db, make_snippet
-from run_query import analyze_query, run_query
+from hybrid_utils import DEFAULT_DB_PATH, DEFAULT_INDEX_DIR, connect_db, make_snippet
+from run_query import analyze_query, get_bytes_per_row, run_query
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "sqlite" / "milestone_demo.db"
-DEFAULT_INDEX_DIR = PROJECT_ROOT / "data" / "index" / "milestone_demo"
 DEFAULT_OUT_PATH = PROJECT_ROOT / "docs" / "evaluation_results.md"
+QUERY_SET_SOURCE = "scripts/evaluate_queries.py"
 
 EVALUATION_QUERIES = [
     {
@@ -28,7 +27,7 @@ EVALUATION_QUERIES = [
     },
     {
         "category": "Structured SQL",
-        "query": "products by Sample Beauty Co.",
+        "query": "products by Bath & Body Works",
         "expected_engine": "sql",
     },
     {
@@ -73,7 +72,27 @@ EVALUATION_QUERIES = [
     },
     {
         "category": "Mixed",
-        "query": "Sample Beauty Co. product for volume",
+        "query": "Maybelline New York waterproof eyebrow makeup",
+        "expected_engine": "mixed",
+    },
+    {
+        "category": "Mixed",
+        "query": "Bath & Body Works product that smells good",
+        "expected_engine": "mixed",
+    },
+    {
+        "category": "Mixed",
+        "query": "L'Oreal Paris product for volume",
+        "expected_engine": "mixed",
+    },
+    {
+        "category": "Mixed",
+        "query": "products under 15 dollars for sensitive skin",
+        "expected_engine": "mixed",
+    },
+    {
+        "category": "Mixed",
+        "query": "Bath & Body Works product for dry skin",
         "expected_engine": "mixed",
     },
     {
@@ -153,10 +172,17 @@ def fetch_dataset_counts(db_path: Path) -> dict[str, int]:
 def run_evaluation(db_path: Path, index_dir: Path, top_k: int) -> list[dict]:
     rows: list[dict] = []
     with connect_db(db_path) as conn:
+        bytes_per_row = get_bytes_per_row(conn)
         for item in EVALUATION_QUERIES:
             start = time.perf_counter()
             analysis = analyze_query(item["query"], conn)
-            route, executed_engine, label, results = run_query(analysis, conn, index_dir, top_k)
+            route, executed_engine, label, results = run_query(
+                analysis,
+                conn,
+                index_dir,
+                top_k,
+                bytes_per_row,
+            )
             elapsed = time.perf_counter() - start
 
             rows.append(
@@ -269,7 +295,7 @@ def render_markdown(
             f"`{dataset_counts['review_count']}` reviews"
         ),
         f"- Top-k: `{top_k}`",
-        f"- Query set: `{len(rows)}` fixed evaluation queries from `docs/evaluation_queries.md`",
+        f"- Query set: `{len(rows)}` fixed evaluation queries from `{QUERY_SET_SOURCE}`",
         f"- Route matches: `{pass_count}/{len(rows)}`",
         "",
         "## Headline Findings",
@@ -289,8 +315,13 @@ def render_markdown(
         (
             f"- Mixed routing matched expectation on all "
             f"`{mixed_summary['route_match_count']}/{mixed_summary['query_count']}` mixed queries, "
-            f"but only `{mixed_rerank_count}/{mixed_summary['query_count']}` completed reranking and "
-            f"`{mixed_zero_result_count}/{mixed_summary['query_count']}` returned zero rows after "
+            f"and `{mixed_rerank_count}/{mixed_summary['query_count']}` completed reranking."
+            if mixed_zero_result_count == 0
+            else
+            f"- Mixed routing matched expectation on all "
+            f"`{mixed_summary['route_match_count']}/{mixed_summary['query_count']}` mixed queries, "
+            f"with `{mixed_rerank_count}/{mixed_summary['query_count']}` completing reranking and "
+            f"`{mixed_zero_result_count}/{mixed_summary['query_count']}` returning zero rows after "
             "SQL candidate filtering."
         ),
         "",
@@ -325,8 +356,8 @@ def render_markdown(
             "",
             "## Caveats",
             "",
-            "- This report checks routing correctness and basic execution behavior on the demo dataset; it is not a formal relevance benchmark.",
-            "- The demo database is intentionally small, so zero-result mixed queries mainly reflect sparse candidate coverage rather than a scalability result.",
+            "- This report checks routing correctness and basic execution behavior on the selected dataset; it is not a formal relevance benchmark.",
+            "- Zero-result mixed queries can reflect sparse candidate coverage or aggressive structured filtering, not necessarily a routing error.",
             "- `Routed` records the analyzer decision, while `Executed` records the engine actually used after mixed-query candidate filtering or fallbacks.",
             "- Vector timings include one-time model loading inside the Python process, so the first vector lookup is a cold-start measurement.",
             "",

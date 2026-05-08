@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import sqlite3
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -33,6 +34,7 @@ def ensure_sentence_transformers() -> object:
     return SentenceTransformer
 
 
+@lru_cache(maxsize=8)
 def load_embedding_model(model_name: str):
     sentence_transformer_cls = ensure_sentence_transformers()
     try:

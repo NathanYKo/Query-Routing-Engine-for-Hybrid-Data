@@ -18,11 +18,10 @@ from hybrid_utils import (
 
 INDEX_DB_PATH = DEFAULT_DB_PATH
 INDEX_OUT_DIR = DEFAULT_INDEX_DIR
-INDEX_REVIEW_LIMIT = 5000
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build a small review embedding index.")
+    parser = argparse.ArgumentParser(description="Build a review embedding index.")
     parser.add_argument(
         "--db",
         type=Path,
@@ -38,8 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit",
         type=int,
-        default=INDEX_REVIEW_LIMIT,
-        help=f"Maximum number of reviews to index. Defaults to {INDEX_REVIEW_LIMIT}",
+        default=None,
+        help="Optional maximum number of reviews to index. Defaults to all reviews.",
     )
     parser.add_argument(
         "--model-name",
@@ -49,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def fetch_reviews(db_path: Path, limit: int) -> list[dict]:
+def fetch_reviews(db_path: Path, limit: int | None) -> list[dict]:
     query = """
     SELECT
         r.review_id,
@@ -64,11 +63,14 @@ def fetch_reviews(db_path: Path, limit: int) -> list[dict]:
     WHERE r.review_text IS NOT NULL
       AND TRIM(r.review_text) <> ''
     ORDER BY r.timestamp_ms DESC
-    LIMIT ?
     """
+    params: tuple[object, ...] = ()
+    if limit is not None:
+        query += "\nLIMIT ?"
+        params = (limit,)
 
     with connect_db(db_path) as conn:
-        rows = conn.execute(query, (limit,)).fetchall()
+        rows = conn.execute(query, params).fetchall()
 
     return [dict(row) for row in rows]
 
