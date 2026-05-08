@@ -95,8 +95,6 @@ Ethan Kusnadi contributed to the SQLite database setup, FAISS vector execution e
 
 Nathan Ko contributed to the query analyzer, review-vector execution path, evaluation and benchmarking, testing, and bug fixes. He helped prepare the presentation and documentation, along with the discussion of results and demo materials.
 
-
-
 ## Notes
 
 - Default database path: `data/sqlite/hybrid_router.db`
