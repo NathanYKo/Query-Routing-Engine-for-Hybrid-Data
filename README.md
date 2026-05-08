@@ -9,6 +9,21 @@ It supports:
 - FAISS product search for semantic product queries
 - mixed SQL + FAISS routing for queries that have both filters and semantic intent
 
+## Dataset
+
+A small sample dataset is included in `data/sample/` for quick testing.
+
+To use the full Amazon Reviews 2023 dataset:
+1. Download from https://amazon-reviews-2023.github.io/
+2. Place the files anywhere accessible
+3. Run the loader with your file paths:
+```powershell
+python scripts/load_amazon_reviews.py `
+  --category All_Beauty `
+  --reviews path/to/All_Beauty.jsonl `
+  --metadata path/to/meta_All_Beauty.jsonl
+```
+
 ## Setup
 
 Install dependencies:
